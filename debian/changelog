@@ -1,3 +1,14 @@
+fcitx5-ari-ime (2.6.4) unstable; urgency=medium
+
+  * Keep the caret after a corrected candidate, with an option to return to
+    the end of the pre-edit instead.
+  * Add candidate-arrow, literal-key reinterpretation, and caret-placement
+    options; shorten KDE configuration labels and move details into tooltips.
+  * Add cross-distribution build, package, installation, and Fcitx5 restart
+    verification tooling.
+
+ -- Kaiyasi <zengcode0315@gmail.com>  Sun, 28 Sep 2026 00:00:00 +0000
+
 fcitx5-ari-ime (2.6.3) unstable; urgency=medium
 
   * Add safe typo correction for repeated Bopomofo keys and invalid leading
