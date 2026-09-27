@@ -21,14 +21,18 @@ phrasing and per-user learning.
   sequences and every supported layout.
 - **English-word friendly** — a tone peels the shortest trailing syllable, so
   brand names stay intact (`aceru/6` → `acer螢`).
+- **Typo-tolerant composition** — when a repeated key or an invalid leading
+  key breaks a 注音 hypothesis, Ari removes it only after the remaining keys
+  independently form a Chinese syllable (`HHK$G$` and `GHK$G$` → `測試`).
 - **Live contextual ranking** — as soon as a complete Chinese result is
   available, libchewing applies its surrounding-word model and learned habits
   to the inline result. Ari does not open a candidate panel automatically;
   press Down to enter normal candidate picking when you want alternatives.
 - **Candidate re-selection anywhere** — press ↓/←/→ to open a cursor that walks
   the whole pre-edit and re-pick any character or phrase; phrase recommendations
-  that contain the focused character remain available even at the end of a
-  word, and earlier picks stay pinned. Candidates can be picked by number key or
+  start at the focused character and may extend toward following text, while
+  earlier text is not pulled into the current lookup. Earlier picks stay pinned.
+  Candidates can be picked by number key or
   direct click/touch, and multi-page lists show their current page in the
   auxiliary line. The labeled `原始鍵 ...` candidate restores a converted
   character back to its raw keys. Literal punctuation cells use the same picker:

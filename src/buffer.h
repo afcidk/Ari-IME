@@ -186,7 +186,7 @@ private:
     void integrateSyllable(const std::string &body, const std::string &typed);
     // Abandon the current 注音 hypothesis WITHOUT committing: the in-progress
     // syllable plus `trailing` become the live English tail after the run.
-    KeyResult flipToEnglish(char trailing);
+    KeyResult flipToEnglish(char trailing, bool markInvalidPrefix = false);
     // While in an English token, a tone key may complete a trailing 注音
     // syllable (e.g. "acer" + "u/6" -> acer螢). Peel it off when the remaining
     // prefix is empty or a real English word, so English typing isn't hijacked.
@@ -236,7 +236,10 @@ private:
     // (or the last character when the caret is at the end).
     // Picking mode (candOpen_ == true): the classic candidate window over one
     // cell; ↑↓ navigate, number keys pick, Esc returns to caret mode.
-    KeyResult enterSelection(const fcitx::Key &key); // freeze + enter caret mode
+    // Freeze + enter caret mode. Callers that are opening a known whole phrase
+    // (for example reconversion) may start at its first cell; normal navigation
+    // keeps the existing end-of-preedit behavior.
+    KeyResult enterSelection(const fcitx::Key &key, bool startAtBeginning = false);
     KeyResult handleSelecting(const fcitx::Key &key);
     KeyResult handleCaret(const fcitx::Key &key);    // caret mode dispatch
     KeyResult handlePicking(const fcitx::Key &key);  // candidate-window dispatch
@@ -312,6 +315,16 @@ private:
     std::vector<std::string> runTyped_;    // keys as typed, parallel to runReadings_;
                                            // empty entries fall back to readings
     std::string englishBuf_;             // live English tail, after the chewing run
+    // A one-key leading ASCII fragment from a failed 注音 hypothesis. If the
+    // rest of the buffer later forms a complete Chinese syllable, that key may
+    // be discarded as an accidental prefix. Longer failed hypotheses are kept
+    // unless the duplicate-key path below can prove a one-key removal.
+    std::size_t invalidPrefixLength_ = 0;
+    // Length of the first failed raw hypothesis, including the key that broke
+    // it. When that failure was caused by a repeated key, one occurrence in
+    // this short prefix may be removed if the resulting body converts.
+    std::size_t invalidSequenceLength_ = 0;
+    char duplicateKey_ = 0;
     std::string syl_;                    // raw keys of the in-progress 注音 syllable
     bool selecting_ = false;             // editing mode active (caret or picking)
     bool candOpen_ = false;              // picking mode: candidate window is open

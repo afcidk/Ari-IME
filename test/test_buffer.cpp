@@ -318,6 +318,89 @@ void test_typing() {
     check_eq(pe("API"), "API", "all-caps acronym stays English");
 }
 
+void test_input_error_correction() {
+    Sim duplicate;
+    duplicate.type("hhk4g4");
+    check_eq(duplicate.preedit(), "測試",
+             "duplicate leading key is filtered when the suffix converts");
+
+    Sim invalidPrefix;
+    invalidPrefix.type("ghk4g4");
+    check_eq(invalidPrefix.preedit(), "測試",
+             "invalid leading key is trimmed when the suffix converts");
+
+    Sim duplicateFinal;
+    duplicateFinal.type("hkk4");
+    check_eq(duplicateFinal.preedit(), "測",
+             "duplicate final key is filtered when the suffix converts");
+
+    Sim duplicateMedial;
+    duplicateMedial.type("suu3");
+    check_eq(duplicateMedial.preedit(), "你",
+             "duplicate medial key is filtered when the suffix converts");
+
+    Sim incompletePrefix;
+    incompletePrefix.type("sucl3");
+    check_eq(incompletePrefix.preedit(), "su好",
+             "an incomplete non-duplicate prefix is not discarded");
+
+    Sim normalEnglish;
+    normalEnglish.type("aceru/6");
+    check(normalEnglish.preedit().rfind("acer", 0) == 0 &&
+              contains_han_character(normalEnglish.preedit()),
+          "ordinary English prefix remains intact during suffix peeling");
+
+    Sim uppercase;
+    uppercase.type("HHK4G4");
+    check_eq(uppercase.preedit(), "測試",
+             "uppercase duplicate and invalid prefixes are corrected");
+
+    Sim shifted;
+    auto shiftedKey = [&shifted](fcitx::KeySym sym) {
+        return shifted.press(
+            fcitx::Key(sym, fcitx::KeyStates{fcitx::KeyState::Shift}));
+    };
+    shiftedKey(FcitxKey_H);
+    shiftedKey(FcitxKey_H);
+    shiftedKey(FcitxKey_K);
+    shiftedKey(FcitxKey_4);
+    shiftedKey(FcitxKey_G);
+    shiftedKey(FcitxKey_4);
+    check_eq(shifted.preedit(), "測試",
+             "shifted physical keys keep typo correction working");
+
+    Sim shiftedSymbol;
+    auto shiftedSymbolKey = [&shiftedSymbol](fcitx::KeySym sym) {
+        return shiftedSymbol.press(
+            fcitx::Key(sym, fcitx::KeyStates{fcitx::KeyState::Shift}));
+    };
+    shiftedSymbolKey(FcitxKey_H);
+    shiftedSymbolKey(FcitxKey_H);
+    shiftedSymbolKey(FcitxKey_K);
+    shiftedSymbolKey(FcitxKey_dollar);
+    shiftedSymbolKey(FcitxKey_G);
+    shiftedSymbolKey(FcitxKey_dollar);
+    check_eq(shiftedSymbol.preedit(), "測試",
+             "shifted symbols keep typo correction working");
+
+    Sim issueNotation;
+    issueNotation.type("HHK$G$");
+    check_eq(issueNotation.preedit(), "測試",
+             "issue notation with shifted tone symbols is corrected");
+
+    Sim invalidIssueNotation;
+    invalidIssueNotation.type("GHK$G$");
+    check_eq(invalidIssueNotation.preedit(), "測試",
+             "issue notation with an invalid prefix is corrected");
+
+    Sim literalDollar;
+    literalDollar.type("price");
+    literalDollar.press(fcitx::Key(
+        FcitxKey_dollar, fcitx::KeyStates{fcitx::KeyState::Shift}));
+    check_eq(literalDollar.preedit(), "price$",
+             "shifted punctuation stays literal without a Chinese suffix");
+}
+
 void test_tone1_space_uses_conversion_result() {
     for (char letter : {'a', 'b'}) {
         Sim singleLetter;
@@ -768,24 +851,23 @@ void test_phrase_priority() {
           "raw-key fallback stays at the end of the visible candidate page");
 }
 
-void test_trailing_phrase_recommendation() {
+void test_forward_phrase_recommendation() {
     Sim s;
     s.type("hk4g4"); // 測試
     s.key(FcitxKey_Down); // open candidates from the final character 試
     const auto candidates = s.cand();
-    check(!candidates.empty(), "trailing phrase opens candidates");
-    check_eq(candidates.front(), "測試",
-             "trailing-character candidates recommend the full phrase first");
+    check(!candidates.empty(), "forward-only candidates open at the target");
+    check(find_visible_candidate(candidates, "試") >= 0,
+          "target character remains available in forward-only candidates");
+    check(find_visible_candidate(candidates, "測試") < 0,
+          "candidates do not inspect the phrase before the target");
 
-    Sim pick;
-    pick.type("hk4g4");
-    pick.key(FcitxKey_Down);
-    const int phraseIndex = find_visible_candidate(pick.cand(), "策士");
-    check(phraseIndex >= 0,
-          "trailing-character candidates include alternatives for the full phrase");
-    pick.b.selectCandidate(phraseIndex);
-    check_eq(pick.preedit(), "策士",
-             "trailing-character phrase pick rewrites from the phrase start");
+    Sim middle;
+    middle.type("su3cl3"); // 你好
+    middle.key(FcitxKey_Left); // caret before 好
+    middle.key(FcitxKey_Down);
+    check(find_visible_candidate(middle.cand(), "你好") < 0,
+          "middle-character candidates do not include a preceding phrase");
 }
 
 void test_live_candidate_preview() {
@@ -1282,6 +1364,38 @@ void test_revert_entry() {
     mid.type("1j4");
     check_eq(mid.preedit(), "su3" + bu + "好",
              "typing after mid-string raw-key revert resumes before next cell");
+
+    Sim uppercaseI;
+    uppercaseI.press(fcitx::Key(
+        FcitxKey_i, fcitx::KeyStates{fcitx::KeyState::Shift}));
+    uppercaseI.key(FcitxKey_space); // I/i -> 喔 with 一聲
+    check_eq(uppercaseI.preedit(), "喔",
+             "shifted i converts while retaining its original key case");
+    uppercaseI.key(FcitxKey_Down);
+    const int uppercaseRaw =
+        find_visible_candidate(uppercaseI.cand(), "原始鍵 I");
+    check(uppercaseRaw >= 0,
+          "raw-key recovery keeps uppercase input state");
+    uppercaseI.b.selectCandidate(uppercaseRaw);
+    check_eq(uppercaseI.preedit(), "I",
+             "raw-key recovery restores the originally typed uppercase key");
+
+    // Out-of-order typing: ㄚ before ㄅ still converts to 拔, but reverting must
+    // give back the keys in the order typed (816), not the canonical 186.
+    Sim outOfOrder;
+    outOfOrder.type("8168");
+    check_eq(outOfOrder.preedit(), "拔8",
+             "out-of-order 816 converts to 拔 before a pending 8");
+    outOfOrder.key(FcitxKey_Left);
+    outOfOrder.key(FcitxKey_Left); // caret before 拔
+    outOfOrder.key(FcitxKey_Down);
+    outOfOrder.key(FcitxKey_Up);   // raw-keys revert candidate
+    check(!outOfOrder.cand().empty() &&
+              outOfOrder.cand().back() == "原始鍵 816",
+          "raw-keys candidate shows the typed order");
+    outOfOrder.key(FcitxKey_Return);
+    check_eq(outOfOrder.preedit(), "8168",
+             "out-of-order raw-key revert restores 816, not 186");
 }
 
 void test_candidate_paging() {
@@ -2021,6 +2135,48 @@ void test_candidate_control_closes_to_caret() {
              "typing after control-close resumes at focused caret");
 }
 
+void test_candidate_modifier_keeps_window() {
+    const std::string bu = bu4_default();
+
+    Sim s;
+    s.type("su3");
+    s.key(FcitxKey_Down);
+    check(s.b.selectionChar() == 0, "modifier test starts with candidate window");
+    const std::string before = s.preedit();
+
+    KeyResult shift = s.press(FcitxKey_Shift_L);
+    check(!shift.handled, "bare Shift is not consumed by candidate picking");
+    check(!shift.updateUI, "bare Shift does not refresh the candidate UI");
+    check(s.b.selectionChar() == 0, "bare Shift keeps the candidate window open");
+    check_eq(s.preedit(), before, "bare Shift does not change pre-edit text");
+
+    KeyResult shiftRight = s.press(FcitxKey_Shift_R);
+    check(!shiftRight.handled, "bare Shift_R is not consumed by candidate picking");
+    check(s.b.selectionChar() == 0, "bare Shift_R keeps the candidate window open");
+
+    KeyResult ctrl = s.press(FcitxKey_Control_L);
+    check(!ctrl.handled, "bare Ctrl is not consumed by candidate picking");
+    check(s.b.selectionChar() == 0, "bare Ctrl keeps the candidate window open");
+
+    KeyResult forgotten = s.press(fcitx::Key(
+        FcitxKey_Delete, fcitx::KeyStates{fcitx::KeyState::Shift}));
+    check(forgotten.handled,
+          "Shift+Delete after bare Shift is still handled in picking");
+    check_eq(s.preedit(), before,
+             "Shift+Delete after bare Shift does not delete the focused cell");
+    check(s.b.selectionChar() == 0,
+          "Shift+Delete after bare Shift stays in candidate picking");
+
+    Sim caret;
+    caret.type("su3cl3");
+    caret.key(FcitxKey_Home);
+    check(caret.b.selectionChar() == -1, "caret setup has no candidate window");
+    caret.press(FcitxKey_Shift_L);
+    caret.type("1j4");
+    check_eq(caret.preedit(), bu + "你好",
+             "bare Shift in caret mode does not exit to end-of-preedit typing");
+}
+
 void test_candidate_right_reaches_end() {
     const std::string bu = bu4_default();
 
@@ -2482,6 +2638,7 @@ int main() {
     test::TempConfigHome configHome("inputer-buffer-test-config");
 
     test_typing();
+    test_input_error_correction();
     test_tone1_space_uses_conversion_result();
     test_common_mixed_literals();
     test_local_context_prediction_examples();
@@ -2497,7 +2654,7 @@ int main() {
     test_forced_english_caret_editing();
     test_backspace();
     test_phrase_priority();
-    test_trailing_phrase_recommendation();
+    test_forward_phrase_recommendation();
     test_live_candidate_preview();
     test_live_matches_top_candidate();
     test_reconversion_core();
@@ -2528,6 +2685,7 @@ int main() {
     test_direct_navigation_enters_editing();
     test_escape_behavior();
     test_candidate_control_closes_to_caret();
+    test_candidate_modifier_keeps_window();
     test_candidate_right_reaches_end();
     test_picking_delete_focused_cell();
     test_fullwidth_punct();

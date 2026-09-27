@@ -1,3 +1,17 @@
+fcitx5-ari-ime (2.6.3) unstable; urgency=medium
+
+  * Add safe typo correction for repeated Bopomofo keys and invalid leading
+    keys; remove a key only after the remaining sequence converts to Han text.
+  * Accept shifted number-row symbols such as `$` as layout tone keys when a
+    frontend reports the resulting punctuation keysym.
+  * Preserve the original case in raw-key recovery and restrict phrase lookup
+    to the focused character and following text.
+  * Keep modifier-only key events in candidate and caret editing from closing
+    the active selection window.
+  * Add regression coverage and documentation for the mixed-input corrections.
+
+ -- Kaiyasi <zengcode0315@gmail.com>  Fri, 28 Aug 2026 00:00:00 +0000
+
 fcitx5-ari-ime (2.6.2) unstable; urgency=medium
 
   * Fix cross-page candidate selection: picks on page 2 or later no longer

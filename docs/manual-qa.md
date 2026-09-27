@@ -85,6 +85,7 @@ and record any application-specific behavior before publishing it.
 |----------|-------|----------|
 | Mixed Chinese/English | Type `aceru/6aj4`, press Enter | Preedit shows `acer螢幕`; app receives `acer螢幕` only after Enter |
 | Literal English | Type `README.md`, press Enter | Preedit and commit stay `README.md` |
+| Input typo correction | Type `HHK$G$` or `GHK$G$`, press Enter | The preedit and commit are `測試`; an ordinary literal such as `price$` remains unchanged |
 | Tone-one result decision | On the default layout, type `a` then Space, `b` then Space, `u` then Space, and an out-of-order body such as `ia` then Space in fresh preedits | `a ` and `b ` stay literal; `u` + Space and valid Han-producing bodies such as `ia` become Chinese, based on actual conversion output rather than a key or word list |
 | URL/version literal | Type `https://ari-ime.test/v1.1.0`, press Enter | Version digits and dots stay literal |
 | Acronym + Chinese | Type `HTTPsu3`, press Enter | Preedit and commit are `HTTP你` |
@@ -97,7 +98,7 @@ and record any application-specific behavior before publishing it.
 | No automatic candidate panel | Type `hk4g4` (`測試`) without pressing Down | Preedit shows `測試` and no candidate panel appears; the result still follows libchewing's contextual ranking |
 | Normal typing stays uncluttered | Type `hk4g4su3` without pressing Down | Preedit becomes `測試你`; digits are never interpreted as candidate picks |
 | Open candidates | Type `su3`, press Down | Candidate window opens on `你`; selected char is visually clear |
-| Trailing phrase recommendation | Type `hk4g4` (`測試`), press Down at the end | The candidate list recommends `測試` before single-character `試` alternatives |
+| Forward phrase recommendation | Type `hk4g4` (`測試`), press Down at the end | The candidate list starts from `試`; it does not inspect the preceding `測` to add `測試` |
 | Pick by number | With candidates open, press `2` | Candidate is applied; preedit updates; no premature commit |
 | Pick by click/touch | Open candidates, click a visible candidate | Same result as number-key selection |
 | Continue after pick | Re-pick a character in a long preedit, then type another syllable | Candidate mode closes and new text appends at the end without extra Right/End keys |

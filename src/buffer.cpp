@@ -187,6 +187,64 @@ int keypadAscii(fcitx::KeySym sym) {
     }
 }
 
+// Some frontends expose a shifted number-row key as its resulting punctuation
+// keysym (`$` instead of `4`). Keep the mapping local to tone handling; a dollar
+// sign in ordinary English must remain a dollar sign when no Chinese
+// composition is active.
+char shiftedNumberRowBase(fcitx::KeySym sym) {
+    switch (sym) {
+    case '!': return '1';
+    case '@': return '2';
+    case '#': return '3';
+    case '$': return '4';
+    case '%': return '5';
+    case '^': return '6';
+    case '&': return '7';
+    case '*': return '8';
+    case '(': return '9';
+    case ')': return '0';
+    default: return 0;
+    }
+}
+
+char preserveTypedAsciiCase(const fcitx::Key &key, fcitx::KeySym sym) {
+    if (sym < 33 || sym > 126) {
+        return 0;
+    }
+    char c = static_cast<char>(sym);
+    // Fcitx frontends may report Shift+i as either the uppercase keysym or the
+    // lowercase keysym with a Shift state. Keep the latter form uppercase too,
+    // so raw-key recovery can reproduce what the user actually typed.
+    if (key.states().test(fcitx::KeyState::Shift) && c >= 'a' && c <= 'z') {
+        c = static_cast<char>(c - ('a' - 'A'));
+    }
+    return c;
+}
+
+bool isModifierOnlyKeySym(fcitx::KeySym sym) {
+    // X11 modifier keysyms. Keep this local and numeric because the headless
+    // WASM key shim intentionally exposes only the small API used by Buffer.
+    switch (sym) {
+    case 0xffe1: // Shift_L
+    case 0xffe2: // Shift_R
+    case 0xffe3: // Control_L
+    case 0xffe4: // Control_R
+    case 0xffe5: // Caps_Lock
+    case 0xffe6: // Shift_Lock
+    case 0xffe7: // Meta_L
+    case 0xffe8: // Meta_R
+    case 0xffe9: // Alt_L
+    case 0xffea: // Alt_R
+    case 0xffeb: // Super_L
+    case 0xffec: // Super_R
+    case 0xffed: // Hyper_L
+    case 0xffee: // Hyper_R
+        return true;
+    default:
+        return false;
+    }
+}
+
 fcitx::KeySym normalizeKeySym(fcitx::KeySym sym) {
     switch (sym) {
     case FcitxKey_KP_Space: return FcitxKey_space;
@@ -515,6 +573,16 @@ bool hasAsciiLetter(const std::string &s) {
     });
 }
 
+bool sameAsciiKey(char a, char b) {
+    if (a >= 'A' && a <= 'Z') {
+        a = static_cast<char>(a + ('a' - 'A'));
+    }
+    if (b >= 'A' && b <= 'Z') {
+        b = static_cast<char>(b + ('a' - 'A'));
+    }
+    return a == b;
+}
+
 bool isSingleAsciiLowerCell(const std::string &text) {
     return text.size() == 1 && isAsciiLower(text[0]);
 }
@@ -631,6 +699,9 @@ void Buffer::reset() {
     runReadings_.clear();
     runTyped_.clear();
     englishBuf_.clear();
+    invalidPrefixLength_ = 0;
+    invalidSequenceLength_ = 0;
+    duplicateKey_ = 0;
     syl_.clear();
     selecting_ = false;
     candOpen_ = false;
@@ -702,6 +773,9 @@ void Buffer::freezeEnglish() {
         cells_.push_back({false, std::string(1, c), {}});
     }
     englishBuf_.clear();
+    invalidPrefixLength_ = 0;
+    invalidSequenceLength_ = 0;
+    duplicateKey_ = 0;
 }
 
 void Buffer::freezeSyllable() {
@@ -790,7 +864,7 @@ KeyResult Buffer::beginReconversion(const std::string &text) {
     }
     selecting_ = true;
     candOpen_ = false;
-    caretPos_ = static_cast<int>(cells_.size());
+    caretPos_ = 0;
     return handleSelecting(fcitx::Key(FcitxKey_Down));
 }
 
@@ -1035,6 +1109,33 @@ KeyResult Buffer::handleAuto(const fcitx::Key &key) {
         }
     }
 
+    // A few frontends pass Shift+4 as the resulting `$` keysym rather than as
+    // `4` with a Shift state. In a live Chinese syllable, or while recovering a
+    // tagged invalid prefix, interpret that physical number-row key as the
+    // layout tone. If it does not complete a Chinese suffix, keep the original
+    // punctuation so ordinary dollar signs and similar symbols are unchanged.
+    const char shiftedTone = shiftedNumberRowBase(sym);
+    const bool shiftedToneContext =
+        shiftedTone != 0 && ari_ime::isToneKey(shiftedTone) &&
+        !key.states().testAny(fcitx::KeyStates{
+            fcitx::KeyState::Ctrl, fcitx::KeyState::Alt,
+            fcitx::KeyState::Super}) &&
+        (key.states().test(fcitx::KeyState::Shift) ||
+         invalidPrefixLength_ > 0 || !syl_.empty());
+    if (shiftedToneContext) {
+        if (token_ == Token::English) {
+            KeyResult peeled;
+            if (tryPeelEnglish(shiftedTone, peeled)) {
+                return peeled;
+            }
+            englishBuf_.push_back(static_cast<char>(sym));
+            return {true, false, {}, true};
+        }
+        if (!syl_.empty()) {
+            return handleChar(shiftedTone);
+        }
+    }
+
     if (hasWordModifier(key)) {
         return {false, false, {}, false};
     }
@@ -1074,7 +1175,7 @@ KeyResult Buffer::handleAuto(const fcitx::Key &key) {
         return handleChar(static_cast<char>(kp), /*literal=*/true);
     }
     if (sym >= 33 && sym <= 126) {
-        return handleChar(static_cast<char>(sym));
+        return handleChar(preserveTypedAsciiCase(key, sym));
     }
 
     return {false, false, {}, false};
@@ -1159,7 +1260,10 @@ KeyResult Buffer::handleChar(char c, bool literal) {
     // through the layout layer because some layouts have dual-role keys (Hsu
     // 'f' is ㄈ at syllable start but ˇ after a body).
     if (!ari_ime::isValidSyllable(syl_ + c, /*allowTone=*/true)) {
-        return handleLiteralChar(c);
+        // Keep the failed hypothesis tagged as a possible accidental prefix.
+        // It is only removed later if the remaining English tail independently
+        // becomes a complete Chinese syllable; ordinary English remains safe.
+        return flipToEnglish(c, /*markInvalidPrefix=*/true);
     }
 
     syl_.push_back(c);
@@ -1228,9 +1332,26 @@ void Buffer::integrateSyllable(const std::string &body,
     token_ = Token::Chinese;
 }
 
-KeyResult Buffer::flipToEnglish(char trailing) {
+KeyResult Buffer::flipToEnglish(char trailing, bool markInvalidPrefix) {
     // No commit: the in-progress syllable's raw keys plus the breaking key become
     // the live English tail, sitting after the (still live) chewing run.
+    if (markInvalidPrefix && englishBuf_.empty()) {
+        // Only a single leading key is a safe implicit-prefix correction. A
+        // longer incomplete syllable may be intentional text; repeated-key
+        // failures are handled separately using duplicateKey_.
+        invalidPrefixLength_ = syl_.size() == 1 ? 1 : 0;
+        invalidSequenceLength_ = syl_.size() + 1;
+        duplicateKey_ = std::any_of(
+            syl_.begin(), syl_.end(), [trailing](char c) {
+                return sameAsciiKey(c, trailing);
+            })
+                            ? trailing
+                            : 0;
+    } else {
+        invalidPrefixLength_ = 0;
+        invalidSequenceLength_ = 0;
+        duplicateKey_ = 0;
+    }
     englishBuf_ += syl_;
     englishBuf_.push_back(trailing);
     syl_.clear();
@@ -1411,23 +1532,12 @@ void Buffer::rankSelCands() {
 
 bool Buffer::tryPeelEnglish(char tone, KeyResult &out) {
     const std::string &buf = englishBuf_;
-    // A punctuation-looking key may have been kept literal at a boundary because
-    // it was ambiguous on its own. If the trailing literal tail later forms a
-    // clear symbol-led zhuyin body, recover that longer suffix first instead of
-    // peeling only the shortest alphabetic tail.
-    for (std::size_t k = 0; k < buf.size(); ++k) {
-        std::string prefix = buf.substr(0, k);
-        std::string body = buf.substr(k);
-        if (!ari_ime::isValidSyllable(body, /*allowTone=*/false) ||
-            !canPeelSymbolLedFromEnglish(prefix, body)) {
-            continue;
-        }
-        std::string syllable = ari_ime::canonicalKeys(body);
-        syllable.push_back(tone);
-        if (!syllableConverts(syllable)) {
-            continue;
-        }
-
+    auto commit = [this, &out, tone](const std::string &prefix,
+                                     const std::string &body,
+                                     const std::string &syllable) {
+        // Freeze the live run plus the retained English prefix into cells_, then
+        // start a fresh Chinese run with the peeled syllable. The prefix is
+        // intentionally empty for a successful typo correction.
         freezeRun();
         for (char c : prefix) {
             cells_.push_back({false, std::string(1, c), {}});
@@ -1439,9 +1549,81 @@ bool Buffer::tryPeelEnglish(char tone, KeyResult &out) {
         moveAutoCommit();
         token_ = Token::Chinese;
         englishBuf_.clear();
+        invalidPrefixLength_ = 0;
+        invalidSequenceLength_ = 0;
+        duplicateKey_ = 0;
         syl_.clear();
         out = {true, false, {}, true};
         return true;
+    };
+    auto tryBody = [&commit, tone](const std::string &prefix,
+                                   const std::string &body, bool symbolLed) {
+        if (!ari_ime::isValidSyllable(body, /*allowTone=*/false)) {
+            return false;
+        }
+        if (symbolLed) {
+            if (!canPeelSymbolLedFromEnglish(prefix, body)) {
+                return false;
+            }
+        } else if (!canPeelEnglishBody(prefix, body)) {
+            return false;
+        }
+        std::string syllable = ari_ime::canonicalKeys(body);
+        syllable.push_back(tone);
+        if (!syllableConverts(syllable)) {
+            return false;
+        }
+        return commit(prefix, body, syllable);
+    };
+    auto tryCandidate = [&buf, &tryBody](std::size_t split, bool symbolLed) {
+        if (split >= buf.size()) {
+            return false;
+        }
+        return tryBody(buf.substr(0, split), buf.substr(split), symbolLed);
+    };
+    auto tryCorrectedBody = [&tryBody](const std::string &body) {
+        return tryBody({}, body, canPeelSymbolLedBody(body));
+    };
+
+    // A repeated key can make an otherwise valid syllable fail slot validation
+    // (`hkk` or `suu`, for example). If removing one occurrence from the short
+    // failed hypothesis makes the whole tail convert, treat that occurrence as
+    // the accidental duplicate. This is deferred until conversion succeeds, so
+    // an ordinary repeated English letter remains untouched.
+    if (duplicateKey_ != 0 && invalidSequenceLength_ > 0 &&
+        invalidSequenceLength_ <= buf.size()) {
+        for (std::size_t i = 0; i < invalidSequenceLength_; ++i) {
+            if (!sameAsciiKey(buf[i], duplicateKey_)) {
+                continue;
+            }
+            std::string corrected = buf;
+            corrected.erase(i, 1);
+            if (tryCorrectedBody(corrected)) {
+                return true;
+            }
+        }
+    }
+
+    // A failed 注音 hypothesis is normally shown as literal English so users
+    // can recover from it. If the exact suffix after that failed prefix later
+    // proves to be a complete Chinese syllable, treat the prefix as an
+    // accidental key and remove it. This is deliberately deferred until the
+    // suffix converts, so ordinary English prefixes keep the existing peel
+    // behavior.
+    if (invalidPrefixLength_ > 0 && invalidPrefixLength_ < buf.size()) {
+        if (tryCorrectedBody(buf.substr(invalidPrefixLength_))) {
+            return true;
+        }
+    }
+
+    // A punctuation-looking key may have been kept literal at a boundary because
+    // it was ambiguous on its own. If the trailing literal tail later forms a
+    // clear symbol-led zhuyin body, recover that longer suffix first instead of
+    // peeling only the shortest alphabetic tail.
+    for (std::size_t k = 0; k < buf.size(); ++k) {
+        if (tryCandidate(k, /*symbolLed=*/true)) {
+            return true;
+        }
     }
 
     // Prefer the shortest trailing syllable (largest k) that actually forms a
@@ -1449,54 +1631,18 @@ bool Buffer::tryPeelEnglish(char tone, KeyResult &out) {
     // keeps brand names like "acer" intact ("aceru/6" -> acer + 螢) without
     // relying on a dictionary, which would miss non-words.
     for (std::size_t k = buf.size(); k-- > 0;) {
-        std::string body = buf.substr(k);
-        if (!ari_ime::isValidSyllable(body, /*allowTone=*/false)) {
-            continue;
+        if (tryCandidate(k, /*symbolLed=*/false)) {
+            return true;
         }
-        std::string prefix = buf.substr(0, k);
-        if (!canPeelEnglishBody(prefix, body)) {
-            continue;
-        }
-        std::string syllable = ari_ime::canonicalKeys(body);
-        syllable.push_back(tone);
-        if (!syllableConverts(syllable)) {
-            continue;
-        }
-
-        // Freeze the live run plus the English prefix into cells_, then start a
-        // fresh Chinese run with the peeled syllable — all still in the pre-edit.
-        freezeRun();
-        for (char c : prefix) {
-            cells_.push_back({false, std::string(1, c), {}});
-        }
-        zhuyin_.feedSequence(syllable);
-        runReadings_ = {syllable};
-        runTyped_ = {body + std::string(1, tone)};
-        zhuyin_.promoteUserPhrases();
-        moveAutoCommit();
-        token_ = Token::Chinese;
-        englishBuf_.clear();
-        syl_.clear();
-        out = {true, false, {}, true};
-        return true;
     }
     return false;
 }
 
 bool Buffer::tryPeelEnglishTone1(KeyResult &out) {
     const std::string &buf = englishBuf_;
-    for (std::size_t k = 0; k < buf.size(); ++k) {
-        std::string prefix = buf.substr(0, k);
-        std::string body = buf.substr(k);
-        if (!ari_ime::isValidSyllable(body, /*allowTone=*/false) ||
-            !canPeelSymbolLedFromEnglish(prefix, body)) {
-            continue;
-        }
-        std::string syllable = ari_ime::canonicalKeys(body);
-        if (!syllableConvertsTone1(syllable)) {
-            continue;
-        }
-
+    auto commit = [this, &out](const std::string &prefix,
+                               const std::string &body,
+                               const std::string &syllable) {
         freezeRun();
         for (char c : prefix) {
             cells_.push_back({false, std::string(1, c), {}});
@@ -1509,9 +1655,64 @@ bool Buffer::tryPeelEnglishTone1(KeyResult &out) {
         moveAutoCommit();
         token_ = Token::Chinese;
         englishBuf_.clear();
+        invalidPrefixLength_ = 0;
+        invalidSequenceLength_ = 0;
+        duplicateKey_ = 0;
         syl_.clear();
         out = {true, false, {}, true};
         return true;
+    };
+    auto tryBody = [&commit](const std::string &prefix, const std::string &body,
+                             bool symbolLed) {
+        if (!ari_ime::isValidSyllable(body, /*allowTone=*/false)) {
+            return false;
+        }
+        if (symbolLed) {
+            if (!canPeelSymbolLedFromEnglish(prefix, body)) {
+                return false;
+            }
+        } else if (!canPeelEnglishBody(prefix, body)) {
+            return false;
+        }
+        const std::string syllable = ari_ime::canonicalKeys(body);
+        if (!syllableConvertsTone1(syllable)) {
+            return false;
+        }
+        return commit(prefix, body, syllable);
+    };
+    auto tryCandidate = [&buf, &tryBody](std::size_t split, bool symbolLed) {
+        if (split >= buf.size()) {
+            return false;
+        }
+        return tryBody(buf.substr(0, split), buf.substr(split), symbolLed);
+    };
+    auto tryCorrectedBody = [&tryBody](const std::string &body) {
+        return tryBody({}, body, canPeelSymbolLedBody(body));
+    };
+
+    if (invalidPrefixLength_ > 0 && invalidPrefixLength_ < buf.size()) {
+        if (tryCorrectedBody(buf.substr(invalidPrefixLength_))) {
+            return true;
+        }
+    }
+    if (duplicateKey_ != 0 && invalidSequenceLength_ > 0 &&
+        invalidSequenceLength_ <= buf.size()) {
+        for (std::size_t i = 0; i < invalidSequenceLength_; ++i) {
+            if (!sameAsciiKey(buf[i], duplicateKey_)) {
+                continue;
+            }
+            std::string corrected = buf;
+            corrected.erase(i, 1);
+            if (tryCorrectedBody(corrected)) {
+                return true;
+            }
+        }
+    }
+
+    for (std::size_t k = 0; k < buf.size(); ++k) {
+        if (tryCandidate(k, /*symbolLed=*/true)) {
+            return true;
+        }
     }
     return false;
 }
@@ -1561,7 +1762,8 @@ KeyResult Buffer::handleSpace() {
     if (spaceCandidateMode_ && !forcedEnglish_ &&
         token_ == Token::Chinese && syl_.empty() && englishBuf_.empty() &&
         zhuyin_.hasConverted()) {
-        return enterSelection(fcitx::Key(FcitxKey_Down));
+        return enterSelection(fcitx::Key(FcitxKey_Down),
+                              /*startAtBeginning=*/true);
     }
     // Otherwise space is a literal separator: fold the current token into cells_
     // and append a space. Still no commit — only Enter commits.
@@ -1692,20 +1894,54 @@ KeyResult Buffer::handleBackspace() {
     }
     if (!englishBuf_.empty()) {
         englishBuf_.pop_back();
+        // Once the user backspaces through the breaking key and reaches the
+        // tagged failed hypothesis, that hypothesis is no longer accidental
+        // input we can safely discard on a later suffix.
+        if (invalidSequenceLength_ >= englishBuf_.size()) {
+            invalidPrefixLength_ = 0;
+            invalidSequenceLength_ = 0;
+            duplicateKey_ = 0;
+        }
         if (englishBuf_.empty() && !forcedEnglish_) {
             token_ = Token::Chinese;
         }
         return {true, false, {}, true};
     }
     if (!zhuyin_.preedit().empty()) {
-        zhuyin_.handleBackspace();
+        // libchewing keeps a syllable in canonical slot order.  Releasing a
+        // converted character through its native Backspace path would therefore
+        // expose that order ("104") instead of the order the user entered
+        // ("140").  Rebuild the preceding live run and put the final syllable
+        // back into the raw tail from our parallel typed-key record.
         if (!runReadings_.empty()) {
+            const std::string reading = runReadings_.back();
+            const std::string typed = runTyped_.empty()
+                                          ? reading
+                                          : runTyped_.back();
             runReadings_.pop_back();
+            if (!runTyped_.empty()) {
+                runTyped_.pop_back();
+            }
+
+            zhuyin_.resetAll();
+            for (const std::string &savedReading : runReadings_) {
+                auto [body, tone1] = readingBody(savedReading);
+                for (char c : body) {
+                    zhuyin_.handleDefault(static_cast<int>(c));
+                }
+                if (tone1) {
+                    zhuyin_.handleSpace();
+                }
+            }
+            zhuyin_.promoteUserPhrases();
+            moveAutoCommit();
+            syl_ = typedBody(typed, reading).first;
+            return {true, false, {}, true};
         }
-        // Keep the parallel typed-keys array in lockstep with runReadings_.
-        if (!runTyped_.empty()) {
-            runTyped_.pop_back();
-        }
+
+        // A run without Ari reading metadata can only arise from a defensive
+        // fallback. Preserve the engine's usual behavior in that case.
+        zhuyin_.handleBackspace();
         return {true, false, {}, true};
     }
     if (!cells_.empty()) {
@@ -1845,17 +2081,12 @@ void Buffer::buildSelCands() {
                            });
     };
 
-    // Query every phrase interval that can contain the selected character. When
-    // the caret is at the end of a word such as 測試, querying only the last
-    // character would expose 試's homophones and hide the useful word-level
-    // recommendation 測試. The chosen candidate remembers its own start so a
-    // phrase can still be picked while the visual cursor remains on the target
-    // character.
-    for (int startOffset = targetOffset; startOffset >= 0; --startOffset) {
-        parkAt(startOffset);
-        if (!zhuyin_.openCandidates()) {
-            continue;
-        }
+    // Query only phrase intervals that start at the selected character and can
+    // extend toward following characters. Do not inspect preceding cells: when
+    // the target is B in A+B+C, candidates may cover B+C but never A+B.
+    const int startOffset = targetOffset;
+    parkAt(startOffset);
+    if (zhuyin_.openCandidates()) {
         for (int down = 0, guard = 0;
              guard < ari_ime::kMaxSyllables; ++guard, ++down) {
             int total = zhuyin_.candidateCount();
@@ -2054,17 +2285,18 @@ void Buffer::loadCellCandidates() {
     buildSelCands();
 }
 
-KeyResult Buffer::enterSelection(const fcitx::Key &key) {
+KeyResult Buffer::enterSelection(const fcitx::Key &key, bool startAtBeginning) {
     mergeTail(); // reunite any mid-string insertion before re-opening editing
     if (cells_.empty()) {
         // Nothing pending: let the arrow key reach the application.
         return {false, false, {}, false};
     }
-    // Enter caret mode with the caret at the very end, then let the triggering
-    // key (←/→/↓) act: ← steps it left, ↓ opens candidates on the last char.
+    // Enter caret mode at the requested edge, then let the triggering key
+    // (←/→/↓) act. Normal navigation starts at the end; whole-phrase entry
+    // points at the first cell so forward-only lookup can see the phrase.
     selecting_ = true;
     candOpen_ = false;
-    caretPos_ = static_cast<int>(cells_.size());
+    caretPos_ = startAtBeginning ? 0 : static_cast<int>(cells_.size());
     return handleSelecting(key);
 }
 
@@ -2533,6 +2765,16 @@ KeyResult Buffer::handleSelecting(const fcitx::Key &key) {
     // Two sub-modes: a bare caret between characters (insert / navigate) and the
     // candidate window over one cell (re-pick). Number keys only ever pick in the
     // latter, so 注音 starting with a number-row key inserts cleanly in the former.
+    //
+    // Modifier-only keydowns (Shift_L/R, Ctrl, Alt, Super, CapsLock) must not
+    // leave picking or caret mode. Wayland compositors such as Hyprland deliver
+    // Shift as its own event before Shift+Delete; treating that as a generic
+    // control key would close the candidate window and make forget-candidate
+    // unreachable. Leave the event unhandled so the compositor still tracks
+    // modifier state for the following key.
+    if (isModifierOnlyKeySym(key.sym())) {
+        return {false, false, {}, false};
+    }
     return candOpen_ ? handlePicking(key) : handleCaret(key);
 }
 
