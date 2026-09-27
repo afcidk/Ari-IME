@@ -1915,16 +1915,27 @@ KeyResult Buffer::handleBackspace() {
         return {true, false, {}, true};
     }
     if (!zhuyin_.preedit().empty()) {
-        // libchewing keeps a syllable in canonical slot order.  Releasing a
-        // converted character through its native Backspace path would therefore
-        // expose that order ("104") instead of the order the user entered
-        // ("140").  Rebuild the preceding live run and put the final syllable
-        // back into the raw tail from our parallel typed-key record.
+        // libchewing keeps a syllable in canonical slot order. For a syllable
+        // whose typed key order differs from that canonical order (for example
+        // "140" → "104"), rebuild the preceding run and restore the user's
+        // original keys. Canonical input keeps libchewing's native Backspace
+        // path, which also preserves its normal phrase-editing semantics.
         if (!runReadings_.empty()) {
             const std::string reading = runReadings_.back();
             const std::string typed = runTyped_.empty()
                                           ? reading
                                           : runTyped_.back();
+            const auto typedParts = typedBody(typed, reading);
+            const auto readingParts = readingBody(reading);
+            if (typedParts == readingParts) {
+                zhuyin_.handleBackspace();
+                runReadings_.pop_back();
+                if (!runTyped_.empty()) {
+                    runTyped_.pop_back();
+                }
+                return {true, false, {}, true};
+            }
+
             runReadings_.pop_back();
             if (!runTyped_.empty()) {
                 runTyped_.pop_back();
@@ -1942,7 +1953,7 @@ KeyResult Buffer::handleBackspace() {
             }
             zhuyin_.promoteUserPhrases();
             moveAutoCommit();
-            syl_ = typedBody(typed, reading).first;
+            syl_ = typedParts.first;
             return {true, false, {}, true};
         }
 

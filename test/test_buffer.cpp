@@ -382,7 +382,11 @@ void test_input_error_correction() {
 
     Sim duplicateFinal;
     duplicateFinal.type("hkk4");
-    check_eq(duplicateFinal.preedit(), "測",
+    const std::string duplicateFinalExpected =
+        direct_conversion(ari_ime::KeyboardLayout::Default, "hk4");
+    check(!duplicateFinalExpected.empty(),
+          "canonical suffix converts before duplicate-final comparison");
+    check_eq(duplicateFinal.preedit(), duplicateFinalExpected,
              "duplicate final key is filtered when the suffix converts");
 
     Sim duplicateMedial;
@@ -913,6 +917,14 @@ void test_backspace() {
     s.type("su3cl3"); // 你好
     s.key(FcitxKey_BackSpace);
     check_eq(s.preedit(), "你", "backspace deletes 好");
+
+    Sim outOfOrder;
+    outOfOrder.type("140");
+    check(contains_han_character(outOfOrder.preedit()),
+          "out-of-order syllable converts before backspace");
+    outOfOrder.key(FcitxKey_BackSpace);
+    check_eq(outOfOrder.preedit(), "140",
+             "backspace restores out-of-order keys in their typed order");
 }
 
 // Caret model: ←/→ move a caret between characters; ↓ opens the candidate window
